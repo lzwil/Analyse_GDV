@@ -4,7 +4,7 @@ library(writexl)
 library(janitor)
 library(ggplot2)
 
-setwd("C:\\Users\\A159692\\Documents\\these_Axelle")
+setwd("C:/Users/leozw/Documents/Analyse_GDV")
 
 data_final <- read_xlsx("data_final.xlsx")
 
@@ -42,58 +42,52 @@ write_xlsx(df, "tableau_final_corrige.xlsx")
 
 ########################### Analyse stat #######################
 
-# Variables continues vs ordinales
-vars_continuous <- c("H_coucher_sem_heures", "age_enf", "poidskg_enf", "taille_enf")
-vars_ordinal <- setdiff(vars, vars_continuous)
+# Partir de ce tableau pour garder l'original
+data <- df
 
-results_pub <- lapply(vars, function(v) {
-  if (v %in% vars_continuous) {
-    # Moyenne et SD
-    mean_Non <- mean(data[[v]][data$AcVC_yn == "Non"], na.rm = TRUE)
-    sd_Non <- sd(data[[v]][data$AcVC_yn == "Non"], na.rm = TRUE)
-    mean_Oui <- mean(data[[v]][data$AcVC_yn == "Oui"], na.rm = TRUE)
-    sd_Oui <- sd(data[[v]][data$AcVC_yn == "Oui"], na.rm = TRUE)
-    
-    # Test t
-    test <- t.test(data[[v]] ~ data$AcVC_yn)
-    
-    value_Non <- sprintf("%.1f [%.1f]", med_Non, IQR_Non)
-    value_Oui <- sprintf("%.1f [%.1f]", med_Oui, IQR_Oui)
-    test_used <- "t-test"
-    
+# Colonnes à analyser
+vars <- c("H_coucher_sem_heures", "age_enf", "poidskg_enf", "taille_enf", 
+          "sdq_hyper1", "sdq_hyper2", "sdq_hyper3", "sdq_hyper4", "sdq_hyper5",
+          "sdq_emot1", "sdq_emot2", "sdq_emot3", "sdq_emot4", "sdq_emot5",
+          "sdq_comport1", "sdq_comport2", "sdq_comport3", "sdq_comport4")
+
+# Définir les variables ordinales
+ordinal_vars <- c("sdq_hyper1", "sdq_hyper2", "sdq_hyper3", "sdq_hyper4", "sdq_hyper5",
+                  "sdq_emot1", "sdq_emot2", "sdq_emot3", "sdq_emot4", "sdq_emot5",
+                  "sdq_comport1", "sdq_comport2", "sdq_comport3", "sdq_comport4")
+
+# S'assurer qu'AcVC_yn est un facteur
+data$AcVC_yn <- factor(data$AcVC_yn, levels = c("Non", "Oui"))
+
+# Fonction pour calculer médiane [IQR] et p-value
+analyze_var <- function(var){
+  x <- data[[var]]
+  grp <- data$AcVC_yn
+  
+  med_Non <- median(x[grp == "Non"], na.rm = TRUE)
+  med_Oui <- median(x[grp == "Oui"], na.rm = TRUE)
+  IQR_Non <- IQR(x[grp == "Non"], na.rm = TRUE)
+  IQR_Oui <- IQR(x[grp == "Oui"], na.rm = TRUE)
+  
+  # Format "med [IQR]" avec 1 décimale
+  value_Non <- sprintf("%.1f [%.1f]", med_Non, IQR_Non)
+  value_Oui <- sprintf("%.1f [%.1f]", med_Oui, IQR_Oui)
+  
+  # Choisir le test : Wilcoxon pour ordinales, t-test sinon
+  if(var %in% ordinal_vars){
+    p <- wilcox.test(x ~ grp)$p.value
   } else {
-    # Médiane et IQR
-    med_Non <- median(data[[v]][data$AcVC_yn == "Non"], na.rm = TRUE)
-    IQR_Non <- IQR(data[[v]][data$AcVC_yn == "Non"], na.rm = TRUE)
-    med_Oui <- median(data[[v]][data$AcVC_yn == "Oui"], na.rm = TRUE)
-    IQR_Oui <- IQR(data[[v]][data$AcVC_yn == "Oui"], na.rm = TRUE)
-    
-    # Test de Wilcoxon
-    test <- wilcox.test(data[[v]] ~ data$AcVC_yn)
-    
-    value_Non <- sprintf("%d [%d]", med_Non, IQR_Non)
-    value_Oui <- sprintf("%d [%d]", med_Oui, IQR_Oui)
-    test_used <- "Wilcoxon"
+    p <- t.test(x ~ grp)$p.value
   }
   
-  data.frame(
-    variable = v,
-    test = test_used,
-    p_value = test$p.value,
-    `Non` = value_Non,
-    `Oui` = value_Oui
-  )
-})
+  data.frame(variable = var,
+             Non = value_Non,
+             Oui = value_Oui,
+             p_value = p)
+}
 
-results_pub_df <- do.call(rbind, results_pub)
-rownames(results_pub_df) <- NULL
+# Appliquer à toutes les variables
+results_df <- do.call(rbind, lapply(vars, analyze_var))
 
-# Affiche le tableau final prêt pour publication
-results_pub_df
-
-
-
-
-
-
-
+# Afficher le résultat
+results_df
