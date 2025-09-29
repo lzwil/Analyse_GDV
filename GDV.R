@@ -42,55 +42,56 @@ write_xlsx(df, "tableau_final_corrige.xlsx")
 
 ########################### Analyse stat #######################
 
-
-# Partir de ce tableau pour garder l'original
-data <- df
-
-# Colonnes à analyser
-vars <- c("H_coucher_sem_heures", "age_enf", "poidskg_enf", "taille_enf", 
-          "sdq_hyper1", "sdq_hyper2", "sdq_hyper3", "sdq_hyper4", "sdq_hyper5",
-          "sdq_emot1", "sdq_emot2", "sdq_emot3", "sdq_emot4", "sdq_emot5",
-          "sdq_comport1", "sdq_comport2", "sdq_comport3", "sdq_comport4")
-
 # Variables continues vs ordinales
 vars_continuous <- c("H_coucher_sem_heures", "age_enf", "poidskg_enf", "taille_enf")
 vars_ordinal <- setdiff(vars, vars_continuous)
 
-# S'assurer qu'AcVC_yn est un facteur
-data$AcVC_yn <- factor(data$AcVC_yn, levels = c("Non", "Oui"))
-
-# Résumé par groupe
-library(dplyr)
-data %>%
-  select(all_of(vars), AcVC_yn) %>%
-  group_by(AcVC_yn) %>%
-  summarise(across(everything(), list(mean = ~mean(.x, na.rm = TRUE),
-                                      sd = ~sd(.x, na.rm = TRUE))))
-
-# Calcul des tests
-results <- lapply(vars, function(v) {
+results_pub <- lapply(vars, function(v) {
   if (v %in% vars_continuous) {
-    # Test t pour variables continues
+    # Moyenne et SD
+    mean_Non <- mean(data[[v]][data$AcVC_yn == "Non"], na.rm = TRUE)
+    sd_Non <- sd(data[[v]][data$AcVC_yn == "Non"], na.rm = TRUE)
+    mean_Oui <- mean(data[[v]][data$AcVC_yn == "Oui"], na.rm = TRUE)
+    sd_Oui <- sd(data[[v]][data$AcVC_yn == "Oui"], na.rm = TRUE)
+    
+    # Test t
     test <- t.test(data[[v]] ~ data$AcVC_yn)
+    
+    value_Non <- sprintf("%.1f [%.1f]", med_Non, IQR_Non)
+    value_Oui <- sprintf("%.1f [%.1f]", med_Oui, IQR_Oui)
+    test_used <- "t-test"
+    
   } else {
-    # Test de Wilcoxon pour variables ordinales
+    # Médiane et IQR
+    med_Non <- median(data[[v]][data$AcVC_yn == "Non"], na.rm = TRUE)
+    IQR_Non <- IQR(data[[v]][data$AcVC_yn == "Non"], na.rm = TRUE)
+    med_Oui <- median(data[[v]][data$AcVC_yn == "Oui"], na.rm = TRUE)
+    IQR_Oui <- IQR(data[[v]][data$AcVC_yn == "Oui"], na.rm = TRUE)
+    
+    # Test de Wilcoxon
     test <- wilcox.test(data[[v]] ~ data$AcVC_yn)
+    
+    value_Non <- sprintf("%d [%d]", med_Non, IQR_Non)
+    value_Oui <- sprintf("%d [%d]", med_Oui, IQR_Oui)
+    test_used <- "Wilcoxon"
   }
+  
   data.frame(
     variable = v,
-    test_used = ifelse(v %in% vars_continuous, "t-test", "Wilcoxon"),
+    test = test_used,
     p_value = test$p.value,
-    mean_Non = mean(data[[v]][data$AcVC_yn == "Non"], na.rm = TRUE),
-    mean_Oui = mean(data[[v]][data$AcVC_yn == "Oui"], na.rm = TRUE)
+    `Non` = value_Non,
+    `Oui` = value_Oui
   )
 })
 
-# Combine tous les résultats en un seul data.frame
-results_df <- do.call(rbind, results)
-rownames(results_df) <- NULL
+results_pub_df <- do.call(rbind, results_pub)
+rownames(results_pub_df) <- NULL
 
-# Affiche le tableau final
-results_df
+# Affiche le tableau final prêt pour publication
+results_pub_df
+
+
 
 
 
