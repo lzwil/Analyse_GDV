@@ -3,15 +3,17 @@ library(readxl)
 library(writexl)
 library(janitor)
 library(ggplot2)
+library(tidyr)
 
 setwd("C:/Users/leozw/Documents/Analyse_GDV")
 
 data_final <- read_xlsx("data_final.xlsx")
 
-# rendre heures format lisible 
+# Récupérer juste les lignes enfants et transformer heure en format lisible 
 df <- data_final %>%
+  filter(!is.na(id_data_enf_x)) %>% # Récupérer enfants
   mutate(
-    # Conversion en heures décimales et remplacement des aberrations par NA
+    # Conversion en heures décimales et suppression des valeurs entre 7 et 16h 
     H_coucher_sem_heures = {
       h <- H_coucher_sem / 3600
       ifelse(h >= 7 & h <= 16, NA_real_, h)
@@ -23,24 +25,75 @@ df <- data_final %>%
       NA_character_,
       sprintf("%02d:%02d", floor(H_coucher_sem_heures), round((H_coucher_sem_heures %% 1) * 60))
     )
-  )
-
-
-# caractères en facteur
-df <- df %>%
-  mutate(across(where(is.character), as.factor))
+  ) %>%
+  mutate(across(where(is.character), as.factor)) # caractères en facteur
 
 # résumer tableau 
 glimpse(df)
 
-# equart type dela variable heure de coucher
-sd(df$H_coucher_sem_heures, na.rm = TRUE)
+
+######################## Remaniement Tableau ################################
+
+
+# Liste des variables ordinales à regrouper
+vars_ordinales <- c(
+  "sdq_relat3_p1", "sdq_relat4_p1", "sdq_relat5_p1",
+  "sdq_relat1_p1", "sdq_relat2_p1",
+  "sdq_comport1", "sdq_comport2", "sdq_comport3", "sdq_comport4",
+  "sdq_emot1", "sdq_emot2", "sdq_emot3", "sdq_emot4", "sdq_emot5",
+  "sdq_hyper1", "sdq_hyper2", "sdq_hyper3", "sdq_hyper4"
+)
+
+df <- df %>%
+  select(vars_ordinales, c("age_enf","sexe_enf", "scolarise", "H_coucher_sem", 
+                           "sejour_hospit_yn", "consult_med_urg_yn", "nb_consult_med_urg", 
+                           "motif_consult_med_urg", "AcVC_yn", "nb_AcVC_total", "nb_AcVC_3mois",
+                           "lieu_last_AcVC", "type_last_AcVC", "type_hab2", "type_hab", "type_hab2_autre")) 
+
+# Remplacer les colonnes dans df par le regroupement 0 / 1-2
+df <- df %>%
+  mutate(across(
+    all_of(vars_ordinales),
+    ~ case_when(
+      .x %in% c(1,2) ~ 1,   # regroupe 1 et 2
+      .x == 0 ~ 0,
+      TRUE ~ NA_real_        # garder les NA
+    )
+  ))%>% # Convertir en facteur ordonné pour analyses ou ggplot
+  mutate(across(
+    all_of(vars_ordinales),
+    ~ factor(.x, levels = c(0,1), ordered = TRUE)
+  )) %>% # remplacer Autres par valeurs dans bonne categorie
+  mutate(type_hab2 = case_when(
+    type_hab2 != "Autre" ~ as.character(type_hab2),  # garder les autres valeurs
+    grepl("caravane|mobil home", type_hab2_autre, ignore.case = TRUE) ~ "Habitat mobile (caravane)",
+    grepl("maison|appartement|logement|immeuble|chalet|construction", type_hab2_autre, ignore.case = TRUE) ~ "Construction ou assimilé",
+    TRUE ~ "Habitat mixte (caravane et constructions ou assimilés)"  # par défaut si aucun des critères précédents
+  ))
+
+# Maintenant le tableau de fréquences utilisera directement ce regroupement
+tableau_freq <- df %>%
+  select(all_of(vars_ordinales)) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "variable",
+    values_to = "valeur"
+  ) %>%
+  group_by(variable, valeur) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(variable) %>%
+  mutate(pct = round(100 * n / sum(n), 1)) %>%
+  arrange(variable, valeur)
+
+print(tableau_freq)
+
+glimpse(df)
 
 
 write_xlsx(df, "tableau_final_corrige.xlsx")
 
 
-########################### Analyse stat #######################
+########################### Analyse stat ####################################
 
 # Partir de ce tableau pour garder l'original
 data <- df
