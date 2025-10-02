@@ -6,10 +6,11 @@ library(ggplot2)
 library(tidyr)
 library(stringr)
 library(MASS)       
-library(car)        
 library(broom)
+library(ggplot2)
+select <- dplyr::select
 
-setwd("C:/Users/leozw/Documents/Analyse_GDV")
+setwd("C:/Users/A159692/Documents/these_Axelle")
 
 data_final <- read_xlsx("data_final.xlsx")
 
@@ -27,7 +28,6 @@ data_final <- data_final %>%
   ) %>%
   mutate(across(where(is.character), as.factor))
 
-glimpse(data_final)
 
 # --- Variables ordinales  ---
 vars_ordinales <- c(
@@ -39,7 +39,7 @@ vars_ordinales <- c(
 
 # --- Variables numériques / continues ---
 vars_numeriques <- c(
-  "age_enf", "nb_consult_med_urg", "nb_AcVC_total", "nb_AcVC_3mois"
+  "age_enf", "H_coucher_sem_heures"
 )
 
 # --- Variables qualitatives nominales / facteurs ---
@@ -53,7 +53,8 @@ vars_facteurs <- c(
   "contig_route_yn", "contig_voie_fer_yn", "contig_eau_yn",
   "proxi_routes", "proxi_dechett", "soins_last_AcVC",
   "type_ldv", "statu_occup", "statu_occup_autre",
-  "nb_habitats_empl"
+  "nb_habitats_empl", "act_fer", "nb_consult_med_urg",
+  "nb_AcVC_total", "nb_AcVC_3mois"
 )
 
 # --- Combinaison de tous les vecteurs pour le select ---
@@ -105,7 +106,10 @@ df <- data_final %>%
     lieu_last_AcVC = ifelse(lieu_last_AcVC %in% c("Autre (précisez)", "Sur un lieu de loisirs", "Au cours d’une activité sportive"), "Autre", lieu_last_AcVC),
     
     # # Regroupement des terrains familiaux et locatifs
-    type_ldv = ifelse(type_ldv %in% c("Terrain familial", "Terrain locatif"), "Terrain familial/locatif", type_ldv),
+    type_ldv = case_when(
+      !is.na(type_ldv) & type_ldv %in% c("Terrain familial", "Terrain locatif") ~ "Terrain familial/locatif",
+      TRUE ~ type_ldv
+    ),
     
     # Regroupement des statuts d'occupation en 5 catégories principales
     statu_occup = case_when(
@@ -120,116 +124,209 @@ df <- data_final %>%
     ),
     statu_occup = factor(statu_occup, 
                          levels = c("Propriétaire", "Locataire", "Hebergés", "Occupation illégale", "Resident d'aire acceuil"))
-  )
+  ) %>% # Renommer cloture_yn à "absence_cloture" 
+  mutate(absence_cloture = as.factor(ifelse(cloture_yn == "Oui", "Non",
+                                  ifelse(cloture_yn == "Non", "Oui", cloture_yn))))%>%
+  # Regrouper en classes act_fer
+  mutate(act_fer = case_when(
+    str_detect(act_fer, "Décapage") ~ "Décapage",
+    str_detect(act_fer, "Découpage|Fonte de métaux") ~ "Ferraille / Métaux",
+    str_detect(act_fer, "Récupération") ~ "Récupération",
+    str_detect(act_fer, "Stockage") ~ "Stockage",
+    str_detect(act_fer, "Démontage de voitures") ~ "Démontage véhicules",
+    str_detect(act_fer, "Ravalement") ~ "Ravalement",
+    TRUE ~ NA
+  )) 
 
-# --- Tableau de fréquences ---
-tableau_freq <- df %>%
+
+write_xlsx(df, "tableau_final_corrige.xlsx")
+
+############################# Tableaux des fréquences ###################################
+
+
+# --- Tableau de fréquences pour variables ordinales et facteurs ---
+freq_ordinales <- df %>%
   select(all_of(vars_ordinales)) %>%
   pivot_longer(cols = everything(), names_to = "variable", values_to = "valeur") %>%
   group_by(variable, valeur) %>%
   summarise(n = n(), .groups = "drop") %>%
   group_by(variable) %>%
-  mutate(pct = round(100 * n / sum(n, na.rm = TRUE), 1)) %>%
-  arrange(variable, as.numeric(valeur))
+  mutate(pct = round(100 * n / sum(n, na.rm = TRUE), 1))
+
+vars_facteurs_sans_H <- setdiff(vars_facteurs, "H_coucher_sem")
+freq_facteurs <- df %>%
+  select(all_of(vars_facteurs_sans_H)) %>%
+  mutate(across(everything(), as.character)) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "valeur") %>%
+  group_by(variable, valeur) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(variable) %>%
+  mutate(pct = round(100 * n / sum(n, na.rm = TRUE), 1))
 
 
-print(tableau_freq)
-glimpse(df)
+# --- Statistiques descriptives pour variables numériques ---
+stats_numeriques <- df %>%
+  select(all_of(vars_numeriques)) %>%
+  summarise(across(everything(),
+                   list(
+                     n = ~sum(!is.na(.)),
+                     n_na = ~sum(is.na(.)),
+                     mean = ~mean(., na.rm = TRUE),
+                     sd = ~sd(., na.rm = TRUE),
+                     min = ~min(., na.rm = TRUE),
+                     max = ~max(., na.rm = TRUE)
+                   ),
+                   .names = "{.col}_{.fn}")) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = c("variable", "stat"),
+    names_pattern = "^(.*)_(n|n_na|mean|sd|min|max)$",
+    values_to = "valeur"
+  ) %>%
+  arrange(variable, stat)
+
+# Créer une liste avec les trois tableaux
+liste_onglets <- list(
+  freq_ordinales = freq_ordinales,
+  freq_facteurs = freq_facteurs,
+  stats_numeriques = stats_numeriques
+)
+
+# Écrire le fichier Excel avec plusieurs onglets
+write_xlsx(liste_onglets, path = "frequences.xlsx")
 
 
 
-write_xlsx(df, "tableau_final_corrige.xlsx")
+
+###################### Distribution nb_AcVC_total ######################
+
+#  Ajustement Quasi-Poisson
+quasi_model <- glm(nb_AcVC_total ~ 1, data = df, family = quasipoisson)
+lambda_quasi <- exp(coef(quasi_model))       # moyenne
+disp_quasi <- summary(quasi_model)$dispersion # dispersion
+
+#  Taille de l'échantillon et valeurs
+n_total <- sum(!is.na(df$nb_AcVC_total))
+valeurs <- c(1, 2, 3, 5)
+
+#  Tableau comparatif avec probabilités
+df_tab <- tibble(
+  valeur = valeurs,
+  n_observe = as.numeric(table(factor(df$nb_AcVC_total, levels = valeurs))),
+  prob_quasi = dpois(valeurs, lambda_quasi),          # approx Poisson pour la probabilité
+  nb_attendu_quasi = prob_quasi * n_total,
+  prob_nb = dnbinom(valeurs, size = nb_model$theta, mu = exp(coef(nb_model))),
+  nb_attendu_nb = prob_nb * n_total
+)
+
+print(df_tab)
+
+#  Préparer pour ggplot
+df_long <- df_tab %>%
+  select(valeur, n_observe, nb_attendu_quasi, nb_attendu_nb) %>%
+  pivot_longer(cols = -valeur, names_to = "type", values_to = "count")
+
+#  Graphique comparatif
+ggplot(df_long, aes(x = factor(valeur), y = count, fill = type)) +
+  geom_col(position = "dodge") +
+  labs(x = "Nombre d'événements", y = "Nombre d'observations",
+       fill = "Type", title = "Comparaison Observé vs Quasi-Poisson & Binomiale négative") +
+  scale_fill_manual(values = c("n_observe" = "steelblue",
+                               "nb_attendu_quasi" = "orange",
+                               "nb_attendu_nb" = "darkgreen"),
+                    labels = c("Observé", "Attendu Quasi-Poisson", "Attendu Binomiale négative")) +
+  theme_minimal()
 
 
-########################### Analyse stat ####################################
 
-# Partir de ce tableau pour garder l'original
-data <- df
+var(df$nb_AcVC_total, na.rm=TRUE)
 
-# Colonnes à analyser
-vars <- c("H_coucher_sem_heures", "age_enf", "poidskg_enf", "taille_enf", 
-          "sdq_hyper1", "sdq_hyper2", "sdq_hyper3", "sdq_hyper4", "sdq_hyper5",
-          "sdq_emot1", "sdq_emot2", "sdq_emot3", "sdq_emot4", "sdq_emot5",
-          "sdq_comport1", "sdq_comport2", "sdq_comport3", "sdq_comport4")
 
-# Définir les variables ordinales
-ordinal_vars <- c("sdq_hyper1", "sdq_hyper2", "sdq_hyper3", "sdq_hyper4", "sdq_hyper5",
-                  "sdq_emot1", "sdq_emot2", "sdq_emot3", "sdq_emot4", "sdq_emot5",
-                  "sdq_comport1", "sdq_comport2", "sdq_comport3", "sdq_comport4")
 
-# S'assurer qu'AcVC_yn est un facteur
-data$AcVC_yn <- factor(data$AcVC_yn, levels = c("Non", "Oui"))
+###################### STATS ##############################
 
-# Fonction pour calculer médiane [IQR] et p-value
-analyze_var <- function(var){
-  x <- data[[var]]
-  grp <- data$AcVC_yn
+# --- Filtrer uniquement les observations non manquantes pour nb_AcVC_total ---
+df_cmp <- df %>% filter(!is.na(nb_AcVC_total)) %>%
+  mutate(across(all_of(vars_facteurs), ~ factor(.x))) # convertir toutes les variables factorielles de string à facteur 
+
+# --- Combinaison de toutes les variables explicatives ---
+vars_explicatives <- setdiff(c(vars_facteurs, vars_ordinales, vars_numeriques), c("nb_AcVC_total", "AcVC_yn", "mode_chauf_autre"))
+
+test_quasipoisson_compact <- function(var_name, data) {
+  data_var <- data %>%
+    filter(!is.na(.data[[var_name]]), !is.na(nb_AcVC_total)) %>%
+    mutate(nb_AcVC_total = as.numeric(as.character(nb_AcVC_total)))
   
-  med_Non <- median(x[grp == "Non"], na.rm = TRUE)
-  med_Oui <- median(x[grp == "Oui"], na.rm = TRUE)
-  IQR_Non <- IQR(x[grp == "Non"], na.rm = TRUE)
-  IQR_Oui <- IQR(x[grp == "Oui"], na.rm = TRUE)
+  n_obs <- nrow(data_var)
   
-  # Format "med [IQR]" avec 1 décimale
-  value_Non <- sprintf("%.1f [%.1f]", med_Non, IQR_Non)
-  value_Oui <- sprintf("%.1f [%.1f]", med_Oui, IQR_Oui)
-  
-  # Choisir le test : Wilcoxon pour ordinales, t-test sinon
-  if(var %in% ordinal_vars){
-    p <- wilcox.test(x ~ grp)$p.value
-  } else {
-    p <- t.test(x ~ grp)$p.value
+  # Vérifier que la variable a au moins 2 valeurs distinctes
+  if (dplyr::n_distinct(data_var[[var_name]]) < 2) {
+    return(tibble(
+      variable = var_name,
+      n_obs = n_obs,
+      F_value = NA_real_,
+      p_value = NA_real_,
+      coef_exp = NA_character_,
+      conf_int = NA_character_,
+      status = "Constante"
+    ))
   }
   
-  data.frame(variable = var,
-             Non = value_Non,
-             Oui = value_Oui,
-             p_value = p)
+  # Ajuster le modèle
+  model <- tryCatch(
+    glm(as.formula(paste("nb_AcVC_total ~", var_name)),
+        data = data_var, family = quasipoisson),
+    error = function(e) return(NULL)
+  )
+  
+  if (is.null(model)) {
+    return(tibble(
+      variable = var_name,
+      n_obs = n_obs,
+      F_value = NA_real_,
+      p_value = NA_real_,
+      coef_exp = NA_character_,
+      conf_int = NA_character_,
+      status = "Erreur glm"
+    ))
+  }
+  
+  # ANOVA type II
+  anova_res <- tryCatch(car::Anova(model, test = "F"), error = function(e) NULL)
+  F_value <- if (!is.null(anova_res)) anova_res$`F value`[1] else NA_real_
+  p_value <- if (!is.null(anova_res)) anova_res$`Pr(>F)`[1] else NA_real_
+  
+  # Coefficients exponentiés et IC
+  coef_exp <- tryCatch(exp(coef(model)), error = function(e) NA)
+  ci <- tryCatch(exp(confint.default(model)), error = function(e) NA)
+  
+  # Formater les résultats de façon compacte
+  coef_exp_str <- paste(names(coef_exp), round(coef_exp, 3), collapse = "; ")
+  conf_int_str <- paste(
+    paste0("[", round(ci[,1], 3), ", ", round(ci[,2], 3), "]"),
+    collapse = "; "
+  )
+  
+  tibble(
+    variable = var_name,
+    n_obs = n_obs,
+    F_value = F_value,
+    p_value = p_value,
+    coef_exp = coef_exp_str,
+    conf_int = conf_int_str,
+    status = "OK"
+  )
 }
 
 # Appliquer à toutes les variables
-results_df <- do.call(rbind, lapply(vars, analyze_var))
+vars_explicatives <- setdiff(c(vars_facteurs, vars_ordinales, vars_numeriques),
+                             c("nb_AcVC_total", "AcVC_yn", "mode_chauf_autre"))
 
-# Afficher le résultat
-results_df
+results_compact <- lapply(vars_explicatives, test_quasipoisson_compact, data = df_cmp) %>%
+  bind_rows()
 
-
-#############################################################################
-
-# --- 1. Vérifier la distribution de nb_AcVC_total ---
-summary(df$nb_AcVC_total)
-ggplot(df, aes(x = nb_AcVC_total)) +
-  geom_histogram(binwidth = 1, fill = "skyblue", color = "black") +
-  theme_minimal() +
-  labs(title = "Distribution de nb_AcVC_total", x = "Nombre d'accidents", y = "Effectif")
-
-# --- 2. Vérifier surdispersion ---
-mean_nb <- mean(df$nb_AcVC_total, na.rm = TRUE)
-var_nb <- var(df$nb_AcVC_total, na.rm = TRUE)
-overdispersion_ratio <- var_nb / mean_nb
-overdispersion_ratio  # > 1 → surdispersion → Poisson pas adapté
-
-# --- 3. Modèle de Poisson ---
-mod_pois <- glm(nb_AcVC_total ~ age_enf + sexe_enf + statu_occup + scolarise,
-                data = df, family = poisson(link = "log"))
-
-# Vérifier surdispersion
-dispersion <- sum(residuals(mod_pois, type="pearson")^2) / mod_pois$df.residual
-dispersion  # >1 → surdispersion → utiliser binomiale négative
-
-# --- 4. Modèle binomial négative si surdispersion ---
-mod_nb <- glm.nb(nb_AcVC_total ~ age_enf + sexe_enf + statu_occup + scolarise, data = df)
-
-# --- 5. Résumé et diagnostics ---
-summary(mod_nb)
-Anova(mod_nb, type = "III")  # Tests de type III
-tidy(mod_nb, conf.int = TRUE, exponentiate = TRUE)  # RRs (exp(beta))
-
-# --- 6. Visualisation des effets ---
-library(effects)
-plot(allEffects(mod_nb), multiline = TRUE, main="Effets des variables sur nb_AcVC_total")
-
-
+# Afficher le tableau lisible
+results_compact
 
 
 
