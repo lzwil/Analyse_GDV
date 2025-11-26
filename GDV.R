@@ -8,11 +8,24 @@ library(stringr)
 library(MASS)       
 library(broom)
 library(ggplot2)
+library(MASS)
+library(purrr)
+library(survey)
 select <- dplyr::select
 
-setwd("C:/Users/A159692/Documents/these_Axelle")
-
+setwd("C:/Users/leozw/Documents/Analyse_GDV")
 data_final <- read_xlsx("data_final.xlsx")
+
+# Charger la base RDS si ce n'est pas déjà fait
+GDVf_enf <- readRDS("C:/Users/leozw/Documents/Analyse_GDV/Transmission_GDV/BDD_dico variables/20221213_GDVf_enf.rds")
+
+# Sélectionner les colonnes de pondération dans GDVf_enf
+poids_vars <- GDVf_enf %>% select(id_data_enf, strate, poids_enf, fpc)
+
+# Fusionner avec data_final en gardant toutes les colonnes actuelles
+data_final <- data_final %>%
+  left_join(poids_vars, by = c("id_data_enf_x" = "id_data_enf"))
+
 
 # --- Filtrer enfants et convertir heures ---
 data_final <- data_final %>%
@@ -32,14 +45,14 @@ data_final <- data_final %>%
 # --- Variables ordinales  ---
 vars_ordinales <- c(
   "sdq_relat1_p1", "sdq_relat2_p1", "sdq_relat3_p1", "sdq_relat4_p1", "sdq_relat5_p1",
-  "sdq_comport1", "sdq_comport2", "sdq_comport3", "sdq_comport4",
-  "sdq_emot1", "sdq_emot2", "sdq_emot3", "sdq_emot4", "sdq_emot5",
-  "sdq_hyper1", "sdq_hyper2", "sdq_hyper3", "sdq_hyper4"
+  "sdq_comport1", "sdq_comport3", "sdq_comport4",
+  "sdq_emot2", "sdq_emot4", "sdq_emot5", "sdq_hyper1", "sdq_hyper2", 
+  "sdq_hyper3", "sdq_hyper4", "sdq_hyper5"
 )
 
 # --- Variables numériques / continues ---
 vars_numeriques <- c(
-  "age_enf", "H_coucher_sem_heures"
+  "age_enf", "H_coucher_sem_heures", "poids_enf", "id_data_enf_x", "strate", "fpc"
 )
 
 # --- Variables qualitatives nominales / facteurs ---
@@ -102,8 +115,12 @@ df <- data_final %>%
       type_last_AcVC %in% c("Entorse, luxation", "Fracture") ~ "Entorse_luxation_fracture",
       TRUE ~ NA_character_
     ),
-    # # Regroupement des lieux d'accidents dans Autre 
-    lieu_last_AcVC = ifelse(lieu_last_AcVC %in% c("Autre (précisez)", "Sur un lieu de loisirs", "Au cours d’une activité sportive"), "Autre", lieu_last_AcVC),
+    
+    # Regroupement des lieux d'accidents
+    lieu_last_AcVC = case_when(
+      lieu_last_AcVC %in% c("Autre (précisez)", "Sur un lieu de loisirs", "Au cours d’une activité sportive") ~ "Autre",
+      TRUE ~ as.character(lieu_last_AcVC)
+    ),
     
     # # Regroupement des terrains familiaux et locatifs
     type_ldv = case_when(
@@ -126,7 +143,7 @@ df <- data_final %>%
                          levels = c("Propriétaire", "Locataire", "Hebergés", "Occupation illégale", "Resident d'aire acceuil"))
   ) %>% # Renommer cloture_yn à "absence_cloture" 
   mutate(absence_cloture = as.factor(ifelse(cloture_yn == "Oui", "Non",
-                                  ifelse(cloture_yn == "Non", "Oui", cloture_yn))))%>%
+                                            ifelse(cloture_yn == "Non", "Oui", cloture_yn))))%>%
   # Regrouper en classes act_fer
   mutate(act_fer = case_when(
     str_detect(act_fer, "Décapage") ~ "Décapage",
@@ -205,6 +222,9 @@ quasi_model <- glm(nb_AcVC_total ~ 1, data = df, family = quasipoisson)
 lambda_quasi <- exp(coef(quasi_model))       # moyenne
 disp_quasi <- summary(quasi_model)$dispersion # dispersion
 
+# Ajustement Binomiale négative
+nb_model <- glm.nb(nb_AcVC_total ~ 1, data = df)
+
 #  Taille de l'échantillon et valeurs
 n_total <- sum(!is.na(df$nb_AcVC_total))
 valeurs <- c(1, 2, 3, 5)
@@ -246,87 +266,197 @@ var(df$nb_AcVC_total, na.rm=TRUE)
 ###################### STATS ##############################
 
 # --- Filtrer uniquement les observations non manquantes pour nb_AcVC_total ---
-df_cmp <- df %>% filter(!is.na(nb_AcVC_total)) %>%
+df_report <- df %>%
+  mutate(across(all_of(vars_ordinales),
+                ~ factor(.x, levels = c(0,1), labels = c("Non", "Oui")))) %>%
+  # Recoder les ordinales 0/1 en facteurs "Non"/"Oui" pour affichage
   mutate(across(all_of(vars_facteurs), ~ factor(.x))) # convertir toutes les variables factorielles de string à facteur 
 
 # --- Combinaison de toutes les variables explicatives ---
-vars_explicatives <- setdiff(c(vars_facteurs, vars_ordinales, vars_numeriques), c("nb_AcVC_total", "AcVC_yn", "mode_chauf_autre"))
+vars_explicatives <- setdiff(c(vars_facteurs, vars_ordinales, vars_numeriques),
+                             c("nb_AcVC_total", "AcVC_yn", "mode_chauf_autre",
+                               "H_coucher_sem_heures", "H_coucher_sem"))
 
-test_quasipoisson_compact <- function(var_name, data) {
+
+# --- Nouvelle version de la fonction qui retourne un tibble "long" ---
+test_quasipoisson_long_expand <- function(var_name, data) {
+  
+  # Filtrer les NA et convertir nb_AcVC_total en numérique
   data_var <- data %>%
     filter(!is.na(.data[[var_name]]), !is.na(nb_AcVC_total)) %>%
     mutate(nb_AcVC_total = as.numeric(as.character(nb_AcVC_total)))
   
-  n_obs <- nrow(data_var)
-  
-  # Vérifier que la variable a au moins 2 valeurs distinctes
-  if (dplyr::n_distinct(data_var[[var_name]]) < 2) {
+  # Vérifier nombre d'observations et de modalités
+  if(nrow(data_var) < 2 || length(unique(data_var[[var_name]])) < 2) {
     return(tibble(
       variable = var_name,
-      n_obs = n_obs,
+      n_obs = nrow(data_var),
       F_value = NA_real_,
       p_value = NA_real_,
-      coef_exp = NA_character_,
-      conf_int = NA_character_,
-      status = "Constante"
+      modalite = NA_character_,
+      OR = NA_real_,
+      OR_low = NA_real_,
+      OR_high = NA_real_
     ))
   }
   
-  # Ajuster le modèle
-  model <- tryCatch(
-    glm(as.formula(paste("nb_AcVC_total ~", var_name)),
-        data = data_var, family = quasipoisson),
-    error = function(e) return(NULL)
-  )
-  
-  if (is.null(model)) {
-    return(tibble(
+  safe_result <- tryCatch({
+    # Ajuster le modèle quasi-Poisson
+    model <- glm(as.formula(paste("nb_AcVC_total ~", var_name)),
+                 data = data_var, family = quasipoisson)
+    
+    # ANOVA F test
+    anova_res <- tryCatch(car::Anova(model, test = "F"), error = function(e) NULL)
+    F_val <- if(!is.null(anova_res)) anova_res$`F value`[1] else NA_real_
+    p_val <- if(!is.null(anova_res)) anova_res$`Pr(>F)`[1] else NA_real_
+    
+    # Coefficients exponentiés avec IC 95%
+    coef_tbl <- broom::tidy(model, exponentiate = TRUE, conf.int = TRUE)
+    if(nrow(coef_tbl) == 0) return(NULL)
+    
+    # Modalité de référence
+    ref_mod <- levels(data_var[[var_name]])[1]
+    
+    # Nettoyer les noms de modalités et remplacer l’Intercept par la référence
+    coef_tbl <- coef_tbl %>%
+      mutate(modalite = ifelse(term == "(Intercept)", ref_mod,
+                               gsub(paste0("^", var_name), "", term)))
+    
+    # Construire le tibble final
+    tibble(
       variable = var_name,
-      n_obs = n_obs,
+      n_obs = nrow(data_var),
+      F_value = F_val,
+      p_value = p_val,
+      modalite = coef_tbl$modalite,
+      OR = round(coef_tbl$estimate, 3),
+      OR_low = round(coef_tbl$conf.low, 3),
+      OR_high = round(coef_tbl$conf.high, 3)
+    )
+    
+  }, error = function(e) {
+    tibble(
+      variable = var_name,
+      n_obs = nrow(data_var),
       F_value = NA_real_,
       p_value = NA_real_,
-      coef_exp = NA_character_,
-      conf_int = NA_character_,
-      status = "Erreur glm"
-    ))
-  }
+      modalite = NA_character_,
+      OR = NA_real_,
+      OR_low = NA_real_,
+      OR_high = NA_real_
+    )
+  })
   
-  # ANOVA type II
-  anova_res <- tryCatch(car::Anova(model, test = "F"), error = function(e) NULL)
-  F_value <- if (!is.null(anova_res)) anova_res$`F value`[1] else NA_real_
-  p_value <- if (!is.null(anova_res)) anova_res$`Pr(>F)`[1] else NA_real_
-  
-  # Coefficients exponentiés et IC
-  coef_exp <- tryCatch(exp(coef(model)), error = function(e) NA)
-  ci <- tryCatch(exp(confint.default(model)), error = function(e) NA)
-  
-  # Formater les résultats de façon compacte
-  coef_exp_str <- paste(names(coef_exp), round(coef_exp, 3), collapse = "; ")
-  conf_int_str <- paste(
-    paste0("[", round(ci[,1], 3), ", ", round(ci[,2], 3), "]"),
-    collapse = "; "
-  )
-  
-  tibble(
-    variable = var_name,
-    n_obs = n_obs,
-    F_value = F_value,
-    p_value = p_value,
-    coef_exp = coef_exp_str,
-    conf_int = conf_int_str,
-    status = "OK"
-  )
+  return(safe_result)
 }
 
-# Appliquer à toutes les variables
+# --- Appliquer à toutes les variables ---
+results_long_expanded <- map_dfr(vars_explicatives, ~test_quasipoisson_long_expand(.x, df_report)) %>%
+  mutate(OR_CI = paste0("[", OR_low, "; ", OR_high, "]")) %>%
+  select(variable, n_obs, F_value, p_value, modalite, OR, OR_CI)
+
+# --- Afficher le résultat ---
+results_long_expanded
+
+
+
+# Exporter le tableau en Excel
+write_xlsx(results_long_expanded, path = "results_quasipoisson.xlsx")
+
+
+
+
+
+########################################################
+
+# --- Définir le design pondéré ---
+ENFp <- svydesign(
+  ids = ~id_data_enf_x,
+  strata = ~strate,
+  weights = ~poids_enf,
+  fpc = ~fpc,
+  data = data_final
+)
+options(survey.lonely.psu = "remove")
+
+# --- Fonction quasi-Poisson pondérée ---
+# Fonction quasi-Poisson pondérée avec regTermTest()
+test_quasipoisson_svy2 <- function(var_name, design) {
+  
+  data_var <- subset(design, !is.na(design$variables[[var_name]]) & !is.na(design$variables$nb_AcVC_total))
+  
+  if(length(unique(data_var$variables[[var_name]])) < 2 || nrow(data_var$variables) < 2) {
+    return(tibble(
+      variable = var_name,
+      n_obs = nrow(data_var$variables),
+      F_value = NA_real_,
+      p_value = NA_real_,
+      modalite = NA_character_,
+      OR = NA_real_,
+      OR_low = NA_real_,
+      OR_high = NA_real_
+    ))
+  }
+  
+  safe_result <- tryCatch({
+    
+    model <- svyglm(
+      as.formula(paste("nb_AcVC_total ~", var_name)),
+      design = data_var,
+      family = quasipoisson()
+    )
+    
+    # Test global F pour la variable
+    test_res <- regTermTest(model, as.formula(paste("~", var_name)))
+    F_val <- test_res$F[1]
+    p_val <- test_res$p[1]
+    
+    # Coefficients exponentiés
+    coef_tbl <- broom::tidy(model, exponentiate = TRUE, conf.int = TRUE)
+    
+    ref_mod <- levels(data_var$variables[[var_name]])[1]
+    coef_tbl <- coef_tbl %>%
+      mutate(modalite = ifelse(term == "(Intercept)", ref_mod,
+                               gsub(paste0("^", var_name), "", term)))
+    
+    tibble(
+      variable = var_name,
+      n_obs = nrow(data_var$variables),
+      F_value = F_val,
+      p_value = p_val,
+      modalite = coef_tbl$modalite,
+      OR = round(coef_tbl$estimate, 3),
+      OR_low = round(coef_tbl$conf.low, 3),
+      OR_high = round(coef_tbl$conf.high, 3)
+    )
+    
+  }, error = function(e) {
+    tibble(
+      variable = var_name,
+      n_obs = nrow(data_var$variables),
+      F_value = NA_real_,
+      p_value = NA_real_,
+      modalite = NA_character_,
+      OR = NA_real_,
+      OR_low = NA_real_,
+      OR_high = NA_real_
+    )
+  })
+  
+  return(safe_result)
+}
+
+# --- Appliquer à toutes les variables explicatives ---
 vars_explicatives <- setdiff(c(vars_facteurs, vars_ordinales, vars_numeriques),
-                             c("nb_AcVC_total", "AcVC_yn", "mode_chauf_autre"))
+                             c("nb_AcVC_total", "AcVC_yn", "mode_chauf_autre",
+                               "H_coucher_sem_heures", "H_coucher_sem"))
 
-results_compact <- lapply(vars_explicatives, test_quasipoisson_compact, data = df_cmp) %>%
-  bind_rows()
+results_svy <- map_dfr(vars_explicatives, ~ test_quasipoisson_svy(.x, ENFp)) %>%
+  mutate(OR_CI = paste0("[", OR_low, "; ", OR_high, "]")) %>%
+  select(variable, n_obs, F_value, p_value, modalite, OR, OR_CI)
+results_svy
 
-# Afficher le tableau lisible
-results_compact
+
 
 
 
